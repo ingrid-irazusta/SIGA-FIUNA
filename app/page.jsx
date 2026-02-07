@@ -3,6 +3,8 @@
 import Card from "../components/Card";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useAuth } from "@/lib/useAuth";
+import { getProfileForAuthUser, saveProfileForAuthUser } from "@/lib/supabase";
 
 const SCHEDULE_KEY = "fiuna_os_schedule_v1";
 const PROFILE_KEY = "fiuna_os_profile_v1";
@@ -428,6 +430,61 @@ export default function Page() {
   const [coursesToast, setCoursesToast] = useState("");
   const [nextExam, setNextExam] = useState(null);
 
+  // Hook de autenticación
+  const { isAuthenticated } = useAuth();
+
+  // Cargar perfil desde Supabase cuando el usuario está autenticado
+  useEffect(() => {
+    if (!isAuthenticated || !mounted) return;
+
+    const loadProfile = async () => {
+      try {
+        const saved = await getProfileForAuthUser();
+        if (saved) {
+          const merged = {
+            ...DEFAULT_PROFILE,
+            ...saved,
+            // Blindajes por si cambia el catálogo
+            malla: saved.malla === "2013" || saved.malla === "2023" ? saved.malla : DEFAULT_PROFILE.malla,
+            carrera: CARRERAS.includes(saved.carrera) ? saved.carrera : DEFAULT_PROFILE.carrera,
+          };
+          // Al entrar, dejamos el último perfil "cargado" como activo y también en el borrador.
+          setProfile(merged);
+          setProfileDraft(merged);
+        } else {
+          // Si no hay perfil en Supabase, intentar cargar desde localStorage como fallback
+          const localSaved = loadProfileFromStorage();
+          if (localSaved) {
+            const merged = {
+              ...DEFAULT_PROFILE,
+              ...localSaved,
+              malla: localSaved.malla === "2013" || localSaved.malla === "2023" ? localSaved.malla : DEFAULT_PROFILE.malla,
+              carrera: CARRERAS.includes(localSaved.carrera) ? localSaved.carrera : DEFAULT_PROFILE.carrera,
+            };
+            setProfile(merged);
+            setProfileDraft(merged);
+          }
+        }
+      } catch (error) {
+        console.error('Error loading profile:', error);
+        // Fallback a localStorage si falla Supabase
+        const localSaved = loadProfileFromStorage();
+        if (localSaved) {
+          const merged = {
+            ...DEFAULT_PROFILE,
+            ...localSaved,
+            malla: localSaved.malla === "2013" || localSaved.malla === "2023" ? localSaved.malla : DEFAULT_PROFILE.malla,
+            carrera: CARRERAS.includes(localSaved.carrera) ? localSaved.carrera : DEFAULT_PROFILE.carrera,
+          };
+          setProfile(merged);
+          setProfileDraft(merged);
+        }
+      }
+    };
+
+    loadProfile();
+  }, [isAuthenticated, mounted]);
+
   useEffect(() => {
     const saved = loadProfileFromStorage();
     if (saved) {
@@ -792,13 +849,23 @@ export default function Page() {
     setProfileSavedToast("");
     try {
       setProfile(clean);
+      
+      // Guardar en Supabase primero
       try {
-        localStorage.setItem(PROFILE_KEY, JSON.stringify(clean));
-        // Avisar al header global que el perfil cambió.
-        try { window.dispatchEvent(new Event('fiuna_profile_updated')); } catch {}
-      } catch {
-        // ignore
+        await saveProfileForAuthUser(clean);
+        console.log('Profile saved to Supabase');
+      } catch (supabaseError) {
+        console.warn('Error saving to Supabase, falling back to localStorage:', supabaseError);
+        // Fallback a localStorage si falla Supabase
+        try {
+          localStorage.setItem(PROFILE_KEY, JSON.stringify(clean));
+        } catch {
+          // ignore
+        }
       }
+
+      // Avisar al header global que el perfil cambió.
+      try { window.dispatchEvent(new Event('fiuna_profile_updated')); } catch {}
 
       const res = await syncMallaAndNotas({ carrera: clean.carrera, malla: clean.malla, ci: clean.ci });
       setProfileSavedToast(`✅ Datos cargados (${res?.total || 0} materias)`);

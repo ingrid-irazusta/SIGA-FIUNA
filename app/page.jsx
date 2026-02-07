@@ -767,7 +767,7 @@ export default function Page() {
                 style={{ padding: "8px 10px", fontWeight: 950 }}
                 title="Guarda el perfil y sincroniza Malla + Notas Finales"
               >
-                {profileSaving ? "Cargandoâ€¦" : "Cargar Datos"}
+                {profileSaving ? "Cargando..." : "Cargar Datos"}
               </button>
             }
           >

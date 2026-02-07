@@ -1,5 +1,5 @@
 import "./globals.css";
-import AppShell from "../components/AppShell";
+import { AuthWrapper } from "@/components/AuthWrapper";
 
 export const metadata = {
   title: "S.I.G.A. FIUNA — Preview",
@@ -18,7 +18,7 @@ export default function RootLayout({ children }) {
   return (
     <html lang="es">
       <body>
-        <AppShell>{children}</AppShell>
+        <AuthWrapper>{children}</AuthWrapper>
       </body>
     </html>
   );

@@ -3,25 +3,22 @@
 import Card from "../components/Card";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useProfile, useSchedule, useEvaluations, useCurrentCourses } from "../lib/hooks";
-import { saveProfile, saveCurrentCourses, saveMallaCache, saveNotas } from "../lib/supabase";
-import { loadProfileAsync, saveProfileAsync, loadScheduleAsync, saveScheduleAsync, loadEvaluationsAsync, saveEvaluationsAsync, loadNotasAsync, saveNotasAsync, loadMallaCacheAsync, saveMallaCacheAsync, loadCurrentCoursesAsync, saveCurrentCoursesAsync } from "../lib/storage-adapter";
 
-// Removido: SCHEDULE_KEY (ahora usa Supabase)
-// Removido: PROFILE_KEY (ahora usa Supabase)
-// Removido: CURRENT_COURSES_KEY (ahora usa Supabase)
-// Removido: EVAL_KEY (ahora usa Supabase)
-// Removido: MALLA_CACHE_PREFIX (ahora usa Supabase)
-// Removido: NOTAS_PREFIX (ahora usa Supabase)
+const SCHEDULE_KEY = "fiuna_os_schedule_v1";
+const PROFILE_KEY = "fiuna_os_profile_v1";
+const CURRENT_COURSES_KEY = "fiuna_os_current_courses_v1";
+const EVAL_KEY = "fiuna_os_evaluaciones_v1";
+const MALLA_CACHE_PREFIX = "fiuna_os_malla_cache_v1";
+const NOTAS_PREFIX = "fiuna_os_notas_finales_v3";
 
 const CARRERAS = [
-  "IngenierÃ­a GeogrÃ¡fica y Ambiental",
-  "IngenierÃ­a ElectromecÃ¡nica",
-  "IngenierÃ­a ElectrÃ³nica",
-  "IngenierÃ­a MecÃ¡nica",
-  "IngenierÃ­a MecatrÃ³nica",
-  "IngenierÃ­a Industrial",
-  "IngenierÃ­a Civil",
+  "Ingeniería Geográfica y Ambiental",
+  "Ingeniería Electromecánica",
+  "Ingeniería Electrónica",
+  "Ingeniería Mecánica",
+  "Ingeniería Mecatrónica",
+  "Ingeniería Industrial",
+  "Ingeniería Civil",
 ];
 
 const DEFAULT_PROFILE = {
@@ -59,16 +56,36 @@ function buildBaseNotasRows(mallaItems) {
   })).filter((r) => r.semestre > 0 && r.materia);
 }
 
-function computeNotasKpisFromRowsAndMalla(rows, mallaItems) {
+function computeNotasKpis({ carrera, plan, ci }) {
+  // KPIs “reales”: cuentan TODAS las notas cargadas (incluye 3 oportunidades y filas extra).
+  // Progreso: materias aprobadas (>=2) / total materias de la malla (las que se cargaron en Notas Finales).
   try {
-    const items = Array.isArray(mallaItems) ? mallaItems : [];
-    const total = items.filter((it) => Number(it?.semestre) > 0 && String(it?.materia || '').trim()).length;
+    const notasKey = notasStorageKey({ carrera, plan, ci });
+    let rows = [];
+    try {
+      const raw = localStorage.getItem(notasKey);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed)) rows = parsed;
+    } catch {
+      rows = [];
+    }
+
+    // Total: desde cache de malla (si no existe, usamos filas base).
+    let total = 0;
+    try {
+      const rawM = localStorage.getItem(mallaCacheKey({ carrera, plan }));
+      const parsedM = rawM ? JSON.parse(rawM) : null;
+      const items = Array.isArray(parsedM?.items) ? parsedM.items : [];
+      total = items.filter((it) => Number(it?.semestre) > 0 && String(it?.materia || '').trim()).length;
+    } catch {
+      total = 0;
+    }
 
     const baseSet = new Set();
     const aprobadaByMateria = new Map();
     const todasLasNotas = [];
 
-    for (const r of (rows || [])) {
+    for (const r of rows) {
       const matKey = normText(r?.materia);
       if (!matKey) continue;
       if (r?.base) baseSet.add(matKey);
@@ -119,15 +136,18 @@ async function syncMallaAndNotas({ carrera, malla, ci }) {
 
   // 2) Guardar cache de malla (lo usan Malla y Notas Finales)
   try {
-    await saveMallaCacheAsync(carrera, plan, { ts: Date.now(), items: prepared });
+    localStorage.setItem(mallaCacheKey({ carrera, plan }), JSON.stringify({ ts: Date.now(), items: prepared }));
   } catch {
     // ignore
   }
 
   // 3) Crear/actualizar NOTAS FINALES basado en esa malla (sin borrar extras)
+  const notasKey = notasStorageKey({ carrera, plan, ci });
   let existing = [];
   try {
-    existing = (await loadNotasAsync(ci, carrera, plan)) || [];
+    const raw = localStorage.getItem(notasKey);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(parsed)) existing = parsed;
   } catch {
     existing = [];
   }
@@ -166,7 +186,7 @@ async function syncMallaAndNotas({ carrera, malla, ci }) {
   })();
 
   try {
-    await saveNotasAsync(ci, carrera, plan, merged);
+    localStorage.setItem(notasKey, JSON.stringify(merged));
   } catch {
     // ignore
   }
@@ -174,12 +194,61 @@ async function syncMallaAndNotas({ carrera, malla, ci }) {
   return { total: baseRows.length };
 }
 
-// NOTE: schedule/profile/currentCourses are loaded via async adapter in effects below.
-
-async function syncEvaluacionesWithCoursesAsync(courses) {
+function loadScheduleFromStorage() {
+  if (typeof window === "undefined") return null;
   try {
-    const prevRows = (await loadEvaluationsAsync()) || [];
-    const byMat = new Map((Array.isArray(prevRows) ? prevRows : []).map((r) => [normText(r?.materia), r]));
+    const raw = localStorage.getItem(SCHEDULE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // Esperamos un objeto {1:[...],2:[...],...6:[...]} similar al Horario.
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadProfileFromStorage() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(PROFILE_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    return p && typeof p === "object" ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadCurrentCoursesFromStorage() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(CURRENT_COURSES_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function syncEvaluacionesWithCourses(courses) {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = localStorage.getItem(EVAL_KEY);
+
+    // Formato actual (v33+): un ARRAY de filas [{materia, p1..f3}]
+    // Compatibilidad: si alguna versión vieja guardó {rows:[...]}, lo leemos igual.
+    let prevRows = [];
+    try {
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed)) prevRows = parsed;
+      else if (Array.isArray(parsed?.rows)) prevRows = parsed.rows;
+    } catch {
+      prevRows = [];
+    }
+
+    const byMat = new Map(prevRows.map((r) => [normText(r?.materia), r]));
+
     const nextRows = (courses || [])
       .map((c) => {
         const materia = String(c?.mat || c?.nombre || "").trim();
@@ -196,8 +265,18 @@ async function syncEvaluacionesWithCoursesAsync(courses) {
       })
       .filter((r) => r.materia);
 
-    await saveEvaluationsAsync(nextRows);
-    try { window.dispatchEvent(new Event('fiuna_evaluaciones_updated')); } catch {}
+    // Guardamos SIEMPRE como array (fuente de verdad del módulo Horario de Exámenes)
+    localStorage.setItem(EVAL_KEY, JSON.stringify(nextRows));
+    window.dispatchEvent(new Event("fiuna_evaluaciones_updated"));
+  } catch {
+    // silencio
+  }
+}
+
+
+function saveCurrentCoursesToStorage(list) {
+  try {
+    localStorage.setItem(CURRENT_COURSES_KEY, JSON.stringify(list));
   } catch {
     // ignore
   }
@@ -208,7 +287,7 @@ function dayIdFromISO(iso) {
   try {
     const d = new Date(iso + "T00:00:00");
     const js = d.getDay(); // 0..6 (Dom..Sab)
-    if (js === 0) return 6; // Domingo -> tratamos como SÃ¡bado/6 para no romper
+    if (js === 0) return 6; // Domingo -> tratamos como Sábado/6 para no romper
     return Math.min(js, 6); // Lun=1..Sab=6
   } catch {
     return 1;
@@ -216,11 +295,11 @@ function dayIdFromISO(iso) {
 }
 
 const MOCK = {
-  alumno: "â€”",
-  ci: "â€”",
-  carrera: "IngenierÃ­a GeogrÃ¡fica y Ambiental",
+  alumno: "—",
+  ci: "—",
+  carrera: "Ingeniería Geográfica y Ambiental",
   malla: "2023",
-  ingreso: "â€”",
+  ingreso: "—",
   aprobadas: 6,
   total: 61,
   promedio: "1,86",
@@ -228,13 +307,13 @@ const MOCK = {
   proximoExamen: {
     materia: "Electricidad y Magnetismo",
     tipo: "1er Parcial",
-    fecha: "sÃ¡bado, 24 de enero de 2026",
+    fecha: "sábado, 24 de enero de 2026",
     dias: 11,
     hora: "00:00",
   },
   clasesHoy: [
-    { h: "7:30 - 10:20", mat: "ELECTRICIDAD Y MAGNETISMO", tag: "TEO-B", prof: "ING. C. PANIAGUA", estado: "AÃºn no llegÃ³", aula: "F5" },
-    { h: "10:30 - 12:20", mat: "ELECTRICIDAD Y MAGNETISMO", tag: "PRAC-B", prof: "PIRIS", estado: "AÃºn no llegÃ³", aula: "F5" },
+    { h: "7:30 - 10:20", mat: "ELECTRICIDAD Y MAGNETISMO", tag: "TEO-B", prof: "ING. C. PANIAGUA", estado: "Aún no llegó", aula: "F5" },
+    { h: "10:30 - 12:20", mat: "ELECTRICIDAD Y MAGNETISMO", tag: "PRAC-B", prof: "PIRIS", estado: "Aún no llegó", aula: "F5" },
     { h: "14:00 - 14:50", mat: "ESTATICA", tag: "prac-c", prof: "", estado: "", aula: "No hallada" },
   ],
   materiasEnCurso: [
@@ -271,7 +350,10 @@ function formatDMY(dateYMD){
   return `${d}/${m}/${y}`;
 }
 
-function computeNextExamFromRows(arr){
+function computeNextExamFromStorage(){
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem(EVAL_KEY);
+  const arr = safeParse(raw);
   if (!Array.isArray(arr)) return null;
 
   const TYPES = [
@@ -301,17 +383,17 @@ function computeNextExamFromRows(arr){
     materia: best.materia,
     tipo: best.tipo,
     fecha: formatDMY(best.fecha),
-    hora: best.hora || "â€”",
+    hora: best.hora || "—",
     dias: best.dias,
   };
 }
 
 export default function Page() {
-  // Modo prueba (Ãºtil en receso): permite elegir una fecha manual para probar aulas/calendario
-  // sin depender estrictamente del â€œhoyâ€ real.
-  // IMPORTANTE: NO usamos toISOString() porque usa UTC y puede correrse de dÃ­a en Paraguay.
-  // Esto era la causa mÃ¡s comÃºn de que "Clases de hoy" muestre materias cuando en realidad
-  // hoy no hay clases (te toma el dÃ­a siguiente en UTC).
+  // Modo prueba (útil en receso): permite elegir una fecha manual para probar aulas/calendario
+  // sin depender estrictamente del “hoy” real.
+  // IMPORTANTE: NO usamos toISOString() porque usa UTC y puede correrse de día en Paraguay.
+  // Esto era la causa más común de que "Clases de hoy" muestre materias cuando en realidad
+  // hoy no hay clases (te toma el día siguiente en UTC).
   const nowLocal = new Date();
   const pad2 = (n) => String(n).padStart(2, "0");
   const todayISO = `${nowLocal.getFullYear()}-${pad2(nowLocal.getMonth() + 1)}-${pad2(nowLocal.getDate())}`;
@@ -340,87 +422,65 @@ export default function Page() {
   const [profileSavedToast, setProfileSavedToast] = useState("");
   // Materias en curso (se guarda en localStorage). Base para PROCESO/NOTAS.
   const [currentCourses, setCurrentCourses] = useState([]);
-  // IMPORTANTE: no guardamos en localStorage hasta terminar la hidrataciÃ³n inicial.
-  // Si no, el primer render ([]) pisa el storage y parece que â€œse borra al cambiar de pestaÃ±aâ€.
+  // IMPORTANTE: no guardamos en localStorage hasta terminar la hidratación inicial.
+  // Si no, el primer render ([]) pisa el storage y parece que “se borra al cambiar de pestaña”.
   const coursesHydrated = useRef(false);
   const [coursesToast, setCoursesToast] = useState("");
   const [nextExam, setNextExam] = useState(null);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const saved = await loadProfileAsync();
-        if (saved) {
-          const merged = {
-            ...DEFAULT_PROFILE,
-            ...saved,
-            malla: saved.malla === "2013" || saved.malla === "2023" ? saved.malla : DEFAULT_PROFILE.malla,
-            carrera: CARRERAS.includes(saved.carrera) ? saved.carrera : DEFAULT_PROFILE.carrera,
-          };
-          setProfile(merged);
-          setProfileDraft(merged);
-        }
-      } catch {
-        // ignore
-      }
-    })();
+    const saved = loadProfileFromStorage();
+    if (saved) {
+      const merged = {
+        ...DEFAULT_PROFILE,
+        ...saved,
+        // Blindajes por si cambia el catálogo
+        malla: saved.malla === "2013" || saved.malla === "2023" ? saved.malla : DEFAULT_PROFILE.malla,
+        carrera: CARRERAS.includes(saved.carrera) ? saved.carrera : DEFAULT_PROFILE.carrera,
+      };
+      // Al entrar, dejamos el último perfil "cargado" como activo y también en el borrador.
+      setProfile(merged);
+      setProfileDraft(merged);
+    }
   }, []);
 
   useEffect(() => {
-    // PrÃ³ximo examen: se alimenta desde la pestaÃ±a EVALUACIONES (adapter).
-    const recompute = async () => {
-      try {
-        const rows = await loadEvaluationsAsync();
-        setNextExam(computeNextExamFromRows(Array.isArray(rows) ? rows : []));
-      } catch {
-        setNextExam(null);
-      }
-    };
+    // Próximo examen: se alimenta desde la pestaña EVALUACIONES (localStorage).
+    const recompute = () => setNextExam(computeNextExamFromStorage());
     recompute();
-    const onStorage = () => { recompute(); };
-    window.addEventListener('storage', onStorage);
-    window.addEventListener('fiuna_evaluaciones_updated', onStorage);
+    window.addEventListener('storage', recompute);
+    window.addEventListener('fiuna_evaluaciones_updated', recompute);
     return () => {
-      window.removeEventListener('storage', onStorage);
-      window.removeEventListener('fiuna_evaluaciones_updated', onStorage);
+      window.removeEventListener('storage', recompute);
+      window.removeEventListener('fiuna_evaluaciones_updated', recompute);
     };
   }, []);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const saved = await loadCurrentCoursesAsync();
-        if (saved && saved.length) {
-          const clean = saved
-            .map((x) => ({
-              sem: Number(x?.sem) || 1,
-              mat: String(x?.mat || "").trim(),
-              firma: String(x?.firma || "").trim(),
-            }))
-            .filter((x) => x.mat);
-          setCurrentCourses(clean);
-        }
-      } catch {
-        // ignore
-      } finally {
-        coursesHydrated.current = true;
-      }
-    })();
+    const saved = loadCurrentCoursesFromStorage();
+    if (saved && saved.length) {
+      // Normalizamos forma: { sem: number, mat: string }
+      const clean = saved
+        .map((x) => ({
+          sem: Number(x?.sem) || 1,
+          mat: String(x?.mat || "").trim(),
+          firma: String(x?.firma || "").trim(),
+        }))
+        .filter((x) => x.mat);
+      setCurrentCourses(clean);
+    } else {
+      // No limpiar automáticamente
+  }
+    coursesHydrated.current = true;
   }, []);
 
   useEffect(() => {
     // Carga inicial del horario (solo cliente) para que el primer render coincida con el server.
-    (async () => {
-      try {
-        const sched = await loadScheduleAsync();
-        setSchedule(sched || {});
-      } catch {
-        setSchedule({});
-      }
-    })();
+    const sched = loadScheduleFromStorage();
+    setSchedule(sched || {});
   }, []);
 
-  // Nota: Quitamos el auto-scroll mÃ³vil (evita saltos/espacios raros en algunos navegadores).
+  // Nota: Quitamos el auto-scroll móvil (evita saltos/espacios raros en algunos navegadores).
 
   // IMPORTANTE: ya NO guardamos el perfil en cada cambio.
   // Solo se guarda y se aplica cuando el usuario toca "Cargar Datos".
@@ -428,13 +488,13 @@ export default function Page() {
   const [aulasLoading, setAulasLoading] = useState(false);
   const [aulasInfo, setAulasInfo] = useState({});
   const [aulasError, setAulasError] = useState("");
-  // Estado visual del botÃ³n (sin countdown): loading mÃ­nimo 3s + "verde" 2s al finalizar.
+  // Estado visual del botón (sin countdown): loading mínimo 3s + "verde" 2s al finalizar.
   const [aulasBtnState, setAulasBtnState] = useState("idle");
 
   const effectiveDateISO = useTestDate ? testDateISO : todayISO;
 
   const parseTipoSeccion = (tag = "") => {
-    // Soporta tags histÃ³ricos (TEO-A/PRAC-B) y el nuevo formato (T-A/P-B)
+    // Soporta tags históricos (TEO-A/PRAC-B) y el nuevo formato (T-A/P-B)
     const t = String(tag).toUpperCase().trim();
     const parts = t.split("-");
     const rawTipo = (parts[0] || "").trim();
@@ -488,38 +548,38 @@ export default function Page() {
         const base = data?.error || data?.message || "No se pudo conectar a la BD de aulas";
         const causes =
           "\n\nPosibles causas:\n" +
-          "â€¢ Tu Google Sheet NO estÃ¡ pÃºblico (Compartir â†’ Cualquier persona con el enlace â†’ Lector).\n" +
-          "â€¢ El gid no corresponde a la hoja que contiene BD_Aulas (si tenÃ©s mÃ¡s de una pestaÃ±a).\n" +
-          "â€¢ El CSV devuelve HTML de login (pasa cuando no es pÃºblico).\n" +
-          "â€¢ CambiÃ³ la estructura de columnas (D,E,F,H,I,J,L,M).\n" +
-          "â€¢ Problema temporal de red / Google / bloqueo por extensiones.\n";
-        const debug = `\nDebug: HTTP ${r.status}${data?.debug ? ` â€¢ ${data.debug}` : ""}`;
+          "• Tu Google Sheet NO está público (Compartir → Cualquier persona con el enlace → Lector).\n" +
+          "• El gid no corresponde a la hoja que contiene BD_Aulas (si tenés más de una pestaña).\n" +
+          "• El CSV devuelve HTML de login (pasa cuando no es público).\n" +
+          "• Cambió la estructura de columnas (D,E,F,H,I,J,L,M).\n" +
+          "• Problema temporal de red / Google / bloqueo por extensiones.\n";
+        const debug = `\nDebug: HTTP ${r.status}${data?.debug ? ` • ${data.debug}` : ""}`;
         const msg = `${base}${causes}${debug}`;
         setAulasError(msg);
         // Aviso visible inmediato (sin cambiar tu layout: alert nativo)
         if (typeof window !== "undefined") window.alert(msg);
-        // No sobre-escribimos aulasInfo si fallÃ³.
+        // No sobre-escribimos aulasInfo si falló.
         return;
       }
 
       if (data?.results && typeof data.results === "object") setAulasInfo(data.results);
 
-      // Marcamos Ã©xito para pintar el botÃ³n en verde (sin nÃºmeros).
+      // Marcamos éxito para pintar el botón en verde (sin números).
       shouldShowSuccess = true;
       setAulasOn(true);
     } catch (e) {
       const msg =
         "No se pudo conectar a la BD de aulas.\n\n" +
         "Posibles causas:\n" +
-        "â€¢ Tu Google Sheet no estÃ¡ pÃºblico (lector).\n" +
-        "â€¢ Bloqueo de red (extensiones / antivirus / firewall).\n" +
-        "â€¢ CaÃ­da temporal de Google.\n\n" +
+        "• Tu Google Sheet no está público (lector).\n" +
+        "• Bloqueo de red (extensiones / antivirus / firewall).\n" +
+        "• Caída temporal de Google.\n\n" +
         `Debug: ${e?.message || "Error"}`;
       setAulasError(msg);
       console.error(e);
       if (typeof window !== "undefined") window.alert(msg);
     } finally {
-      // Mantener el estado de "cargando" al menos 3s (sensaciÃ³n de control, sin countdown).
+      // Mantener el estado de "cargando" al menos 3s (sensación de control, sin countdown).
       const elapsed = Date.now() - startedAt;
       const wait = Math.max(0, 3000 - elapsed);
       if (wait) await new Promise((res) => setTimeout(res, wait));
@@ -582,15 +642,15 @@ export default function Page() {
   const progreso = Math.round(notasKpis.progresoPct || 0);
 
   // Normaliza clases para el conector de aulas.
-  // En la UI â€œclases de hoyâ€ venÃ­an como { h, mat, tag, prof }, pero el API espera
+  // En la UI “clases de hoy” venían como { h, mat, tag, prof }, pero el API espera
   // { materia, tipo, seccion, horaInicio }.
   const clasesBase = useMemo(() => {
     const sched = schedule;
     const dayId = dayIdFromISO(effectiveDateISO);
 
-    // 1) Preferimos el horario del usuario (pestaÃ±a "Horario de Clases")
+    // 1) Preferimos el horario del usuario (pestaña "Horario de Clases")
     const fromUser = sched?.[dayId];
-    // IMPORTANTE: si el usuario no cargÃ³ horario, NO mostramos datos mock.
+    // IMPORTANTE: si el usuario no cargó horario, NO mostramos datos mock.
     const list = Array.isArray(fromUser) && fromUser.length ? fromUser : [];
 
     return list.map((c) => {
@@ -614,7 +674,7 @@ export default function Page() {
         h,
         mat: materia,
         tag,
-        prof: c.prof || "â€”",
+        prof: c.prof || "—",
 
         // y los campos esperados por el conector de aulas
         materia,
@@ -626,21 +686,21 @@ export default function Page() {
     });
   }, [effectiveDateISO, schedule]);
 
-  // Normaliza las clases â€œde hoyâ€ para que el conector de aulas reciba los campos esperados.
-  // --- Calendario acadÃ©mico (eventos del dÃ­a) ---
+  // Normaliza las clases “de hoy” para que el conector de aulas reciba los campos esperados.
+  // --- Calendario académico (eventos del día) ---
   const academicEvents = Array.isArray(todayAcademic.events) ? todayAcademic.events : [];
-  const academicNote = todayAcademic.loading ? "" : academicEvents.join(" â€¢ ");
+  const academicNote = todayAcademic.loading ? "" : academicEvents.join(" • ");
   const isNoClassDay = !todayAcademic.loading && academicEvents.some((t) =>
-    /feriado|suspensi|receso|vacaci|pausa|asÃºeto|asueto/i.test(String(t || ""))
+    /feriado|suspensi|receso|vacaci|pausa|asúeto|asueto/i.test(String(t || ""))
   );
 
   const clasesHoy = !isNoClassDay ? clasesBase : [];
   const clasesHoyUI = clasesHoy.map((c) => {
     const key = aulasKey(c);
     const info = aulasInfo[key];
-    const aula = aulasOn ? (info?.found ? info.aula : "â€”") : c.aula;
+    const aula = aulasOn ? (info?.found ? info.aula : "—") : c.aula;
     const estado = aulasOn
-      ? (info?.found ? info.estado : { icon: "â„¹ï¸", text: "Sin coincidencia", code: "NC" })
+      ? (info?.found ? info.estado : { icon: "ℹ️", text: "Sin coincidencia", code: "NC" })
       : null;
     const prof =
       aulasOn && info?.found && estado?.code === "R" && info?.reemplazo
@@ -692,10 +752,10 @@ export default function Page() {
     });
   };
 
-  const onGuardarMaterias = async () => {
+  const onGuardarMaterias = () => {
     // Guardar lista de materias en curso (Inicio) para que Proceso/Evaluaciones/Notas la lean
-    // IMPORTANTE: NO usar setState como â€œfuenteâ€ del snapshot (es async).
-    // Si no, se termina guardando [] en localStorage y parece que â€œse borra todoâ€.
+    // IMPORTANTE: NO usar setState como “fuente” del snapshot (es async).
+    // Si no, se termina guardando [] en localStorage y parece que “se borra todo”.
     const clean = (currentCourses || [])
       .map((x) => ({
         sem: String(x?.sem ?? "").trim(),
@@ -707,10 +767,10 @@ export default function Page() {
 
     setCurrentCourses(clean);
 
-    try { await saveCurrentCoursesAsync(clean); } catch {}
-    // En un solo click: sincroniza tambiÃ©n Horario de ExÃ¡menes.
-    try { await syncEvaluacionesWithCoursesAsync(clean); } catch {}
-    // Evento para que otras pestaÃ±as sincronicen
+    try { localStorage.setItem(CURRENT_COURSES_KEY, JSON.stringify(clean)); } catch {}
+    // En un solo click: sincroniza también Horario de Exámenes.
+    syncEvaluacionesWithCourses(clean);
+    // Evento para que otras pestañas sincronicen
     try { window.dispatchEvent(new Event('fiuna_current_courses_updated')); } catch {}
     try { window.dispatchEvent(new Event('fiuna_courses_updated')); } catch {}
 
@@ -733,18 +793,18 @@ export default function Page() {
     try {
       setProfile(clean);
       try {
-        await saveProfileAsync(clean);
-        // Avisar al header global que el perfil cambiÃ³.
+        localStorage.setItem(PROFILE_KEY, JSON.stringify(clean));
+        // Avisar al header global que el perfil cambió.
         try { window.dispatchEvent(new Event('fiuna_profile_updated')); } catch {}
       } catch {
         // ignore
       }
 
       const res = await syncMallaAndNotas({ carrera: clean.carrera, malla: clean.malla, ci: clean.ci });
-      setProfileSavedToast(`âœ… Datos cargados (${res?.total || 0} materias)`);
+      setProfileSavedToast(`✅ Datos cargados (${res?.total || 0} materias)`);
       setTimeout(() => setProfileSavedToast(""), 2600);
     } catch (e) {
-      setProfileSavedToast(`âš ï¸ ${e?.message || "No se pudo cargar"}`);
+      setProfileSavedToast(`⚠️ ${e?.message || "No se pudo cargar"}`);
       setTimeout(() => setProfileSavedToast(""), 3200);
     } finally {
       setProfileSaving(false);
@@ -755,10 +815,10 @@ export default function Page() {
   return (
     <div className="grid" style={{ gap: 14 }}>
       <div className="dashGrid">
-        {/* Orden lÃ³gico (mobile): Perfil -> Avance -> Clases -> PrÃ³ximo -> Avisos -> Materias */}
+        {/* Orden lógico (mobile): Perfil -> Avance -> Clases -> Próximo -> Avisos -> Materias */}
         <div className="blockProfile">
           <Card
-            title={<span className="sectionLabel">ðŸŽ“ PERFIL DEL ESTUDIANTE</span>}
+            title={<span className="sectionLabel">🎓 PERFIL DEL ESTUDIANTE</span>}
             right={
               <button
                 className="btn btnPrimary"
@@ -767,7 +827,7 @@ export default function Page() {
                 style={{ padding: "8px 10px", fontWeight: 950 }}
                 title="Guarda el perfil y sincroniza Malla + Notas Finales"
               >
-                {profileSaving ? "Cargando..." : "Cargar Datos"}
+                {profileSaving ? "Cargando…" : "Cargar Datos"}
               </button>
             }
           >
@@ -782,14 +842,14 @@ export default function Page() {
               />
             </div>
             <div className="smallRow">
-              <div className="smallKey">C.I. NÂ°:</div>
+              <div className="smallKey">C.I. N°:</div>
               <input
                 className="fakeInput profileField"
                 value={profileDraft.ci}
                 onChange={(e) => setProfileDraft((p) => ({ ...p, ci: e.target.value }))}
                 placeholder="CI"
                 inputMode="numeric"
-                aria-label="CÃ©dula de identidad"
+                aria-label="Cédula de identidad"
               />
             </div>
             <div className="smallRow">
@@ -804,7 +864,7 @@ export default function Page() {
                     <option key={c} value={c}>{c}</option>
                   ))}
                 </select>
-                <span className="muted">â–¾</span>
+                <span className="muted">▾</span>
               </div>
             </div>
             <div className="smallRow">
@@ -818,7 +878,7 @@ export default function Page() {
                   <option value="2013">2013</option>
                   <option value="2023">2023</option>
                 </select>
-                <span className="muted">â–¾</span>
+                <span className="muted">▾</span>
               </div>
             </div>
             <div className="smallRow">
@@ -827,9 +887,9 @@ export default function Page() {
                 className="fakeInput profileField"
                 value={profileDraft.ingreso}
                 onChange={(e) => setProfileDraft((p) => ({ ...p, ingreso: e.target.value }))}
-                placeholder="AÃ±o (ej: 2026)"
+                placeholder="Año (ej: 2026)"
                 inputMode="numeric"
-                aria-label="AÃ±o de ingreso"
+                aria-label="Año de ingreso"
               />
             </div>
 
@@ -840,16 +900,16 @@ export default function Page() {
         </div>
 
         <div className="blockProximo">
-          <Card title={<span className="sectionLabel">â³ PRÃ“XIMO EXAMEN</span>}>
-            <div className="bigDays">{nextExam ? `${nextExam.dias} dÃ­as` : "â€”"}</div>
-            <div className="centerNote">DÃ­as Restantes</div>
+          <Card title={<span className="sectionLabel">⏳ PRÓXIMO EXAMEN</span>}>
+            <div className="bigDays">{nextExam ? `${nextExam.dias} días` : "—"}</div>
+            <div className="centerNote">Días Restantes</div>
             <div style={{ height: 10 }} />
             <div style={{ display: "grid", gap: 6 }}>
-              <div style={{ fontWeight: 950 }}>ðŸ“Œ {nextExam ? nextExam.tipo : "Sin examen"}</div>
-              <div style={{ fontWeight: 900, textTransform: "lowercase" }}>{(nextExam ? nextExam.materia : "CargÃ¡ tus fechas en Horario de ExÃ¡menes").toLowerCase()}</div>
+              <div style={{ fontWeight: 950 }}>📌 {nextExam ? nextExam.tipo : "Sin examen"}</div>
+              <div style={{ fontWeight: 900, textTransform: "lowercase" }}>{(nextExam ? nextExam.materia : "Cargá tus fechas en Horario de Exámenes").toLowerCase()}</div>
               <div className="metaLine">
-                <span>ðŸ—“ï¸ {nextExam ? nextExam.fecha : "â€”"}</span>
-                <span>â° {nextExam ? nextExam.hora : "â€”"}</span>
+                <span>🗓️ {nextExam ? nextExam.fecha : "—"}</span>
+                <span>⏰ {nextExam ? nextExam.hora : "—"}</span>
               </div>
             </div>
           </Card>
@@ -857,7 +917,7 @@ export default function Page() {
 
         <div className="blockMaterias">
           <Card
-            title={<span className="sectionLabel">ðŸ“š Materias en curso</span>}
+            title={<span className="sectionLabel">📚 Materias en curso</span>}
             right={
               <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                 <button className="btn" onClick={addCourseRow} style={{ padding: "8px 10px", fontSize: 12 }}>
@@ -867,7 +927,7 @@ export default function Page() {
                   className="btn btnPrimary"
                   onClick={onGuardarMaterias}
                   style={{ padding: "8px 10px", fontSize: 12 }}
-                  title="Guardar/ordenar y usar esta lista para Proceso de EvaluaciÃ³n"
+                  title="Guardar/ordenar y usar esta lista para Proceso de Evaluación"
                 >
                   Guardar
                 </button>
@@ -932,7 +992,7 @@ export default function Page() {
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
                                 e.preventDefault();
-                                // Si es la Ãºltima fila, agregamos una nueva; si no, bajamos a la siguiente
+                                // Si es la última fila, agregamos una nueva; si no, bajamos a la siguiente
                                 const nextIdx = idx + 1;
                                 if (nextIdx >= currentCourses.length) {
                                   addCourseRow();
@@ -949,11 +1009,11 @@ export default function Page() {
                             data-course-firma={idx}
                             aria-label={`Firma fila ${idx + 1}`}
                           >
-                            <option value="">â€”</option>
+                            <option value="">—</option>
                             <option value="SI">SI</option>
                             <option value="NO">NO</option>
                           </select>
-                          <span className="muted">â–¾</span>
+                          <span className="muted">▾</span>
                         </div>
                         <button
                           type="button"
@@ -963,7 +1023,7 @@ export default function Page() {
                           aria-label="Eliminar fila"
                           title="Eliminar"
                         >
-                          âœ•
+                          ✕
                         </button>
                       </div>
                     </td>
@@ -972,11 +1032,11 @@ export default function Page() {
             </table>
             {!currentCourses.length ? (
               <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-                AÃºn no cargaste materias. TocÃ¡ <b>+ Agregar</b> para crear la primera fila.
+                Aún no cargaste materias. Tocá <b>+ Agregar</b> para crear la primera fila.
               </div>
             ) : null}
             <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-              Esta lista define cuÃ¡ntas tarjetas se generan en <b>Proceso de EvaluaciÃ³n</b> y <b>Notas Finales</b>.
+              Esta lista define cuántas tarjetas se generan en <b>Proceso de Evaluación</b> y <b>Notas Finales</b>.
               {coursesToast ? <span style={{ marginLeft: 10 }}>{coursesToast}</span> : null}
             </div>
           </Card>
@@ -984,7 +1044,7 @@ export default function Page() {
 
         <div className="blockAvance">
           <Card
-            title={<span className="sectionLabel">ðŸš€ AVANCE ACADÃ‰MICO</span>}
+            title={<span className="sectionLabel">🚀 AVANCE ACADÉMICO</span>}
             right={<span className="pill mono">Promedio&nbsp;{notasKpis.promedioStr}</span>}
           >
             <div style={{ display: "grid", gap: 10 }}>
@@ -1007,7 +1067,7 @@ export default function Page() {
 
         <div className="blockClases" id="clases-hoy">
           <Card
-            title={<span className="sectionLabel">ðŸ—“ï¸ CLASES DE HOY</span>}
+            title={<span className="sectionLabel">🗓️ CLASES DE HOY</span>}
             right={
               <button
                 className={`btn btnPrimary${aulasBtnState === "success" ? " btnSuccess" : ""}`}
@@ -1047,31 +1107,31 @@ export default function Page() {
 
             {aulasError ? (
               <div className="metaLine" style={{ marginBottom: 10, opacity: 0.95 }}>
-                <span>âš ï¸ {aulasError.split("\n")[0]}</span>
+                <span>⚠️ {aulasError.split("\n")[0]}</span>
               </div>
             ) : null}
 
             <div className="todayList">
               {!todayAcademic.loading && isNoClassDay && (
                 <div className="classItem" style={{ borderStyle: "dashed", opacity: 0.95 }}>
-                  <div className="timeCol">â€”</div>
+                  <div className="timeCol">—</div>
                   <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontWeight: 950 }}>ðŸ“… Hoy no hay clases</div>
-                    <div className="metaLine"><span>{academicNote || "Evento acadÃ©mico"}</span></div>
+                    <div style={{ fontWeight: 950 }}>📅 Hoy no hay clases</div>
+                    <div className="metaLine"><span>{academicNote || "Evento académico"}</span></div>
                   </div>
                 </div>
               )}
               {!isNoClassDay && academicNote && (
                 <div className="classItem" style={{ opacity: 0.9 }}>
-                  <div className="timeCol">ðŸ“Œ</div>
-                  <div className="metaLine"><span><strong>Calendario acadÃ©mico:</strong> {academicNote}</span></div>
+                  <div className="timeCol">📌</div>
+                  <div className="metaLine"><span><strong>Calendario académico:</strong> {academicNote}</span></div>
                 </div>
               )}
               {!isNoClassDay && !clasesHoyUI.length && (
                 <div className="classItem" style={{ borderStyle: "dashed", opacity: 0.95 }}>
-                  <div className="timeCol">â€”</div>
+                  <div className="timeCol">—</div>
                   <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontWeight: 950 }}>ðŸŒ¿ DÃ­a libre</div>
+                    <div style={{ fontWeight: 950 }}>🌿 Día libre</div>
                     <div className="metaLine"><span>Sin clases</span></div>
                   </div>
                 </div>
@@ -1082,21 +1142,21 @@ export default function Page() {
                   <div style={{ display: "grid", gap: 4 }}>
                     <div style={{ fontWeight: 950 }}>{c.mat} <span className="muted">({c.tag})</span></div>
                     <div className="metaLine">
-                      <span>ðŸ‘¤ {c.prof || "â€”"}</span>
+                      <span>👤 {c.prof || "—"}</span>
                       {c._estado?.text ? (
-                        <span className={c._estado.icon === "âœ…" ? "badgeOk" : c._estado.icon === "âŒ" ? "badgeBad" : "badgeWarn"}>
+                        <span className={c._estado.icon === "✅" ? "badgeOk" : c._estado.icon === "❌" ? "badgeBad" : "badgeWarn"}>
                           {c._estado.icon} {c._estado.text}
                         </span>
                       ) : null}
                     </div>
                     <div className="metaLine">
                       <span>
-                        ðŸ« Aula: <span className="mono">{c._aula || "â€”"}</span>
+                        🏫 Aula: <span className="mono">{c._aula || "—"}</span>
                       </span>
                     </div>
                     {c._obs ? (
                       <div className="metaLine">
-                        <span>ðŸ“ {c._obs}</span>
+                        <span>📝 {c._obs}</span>
                       </div>
                     ) : null}
                   </div>
@@ -1107,19 +1167,15 @@ export default function Page() {
         </div>
 
         <div className="blockAvisos">
-          <Card className="fullWidth" title={<span className="sectionLabel">ðŸ§­ AVISOS</span>}>
+          <Card className="fullWidth" title={<span className="sectionLabel">🧭 AVISOS</span>}>
             <div className="avisosBox">
               (Espacio reservado para avisos / recordatorios)
             </div>
           </Card>
         </div>
 
-        <div className="blockLinks footerLinks fullWidth linksBox">ðŸ”— Enlaces Ãºtiles</div>
+        <div className="blockLinks footerLinks fullWidth linksBox">🔗 Enlaces útiles</div>
       </div>
     </div>
   );
 }
-
-
-
-

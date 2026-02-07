@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { loadProfileAsync } from "../lib/storage-adapter";
+import { useAuth } from "../lib/useAuth";
 import { createPortal } from "react-dom";
 
 const APP_TITLE = "SISTEMA INTELIGENTE DE GESTIÓN ACADÉMICA FIUNA";
@@ -30,6 +31,8 @@ function getPageLabel(pathname) {
 
 export default function AppShell({ children }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const { logout } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -133,6 +136,18 @@ export default function AppShell({ children }) {
           ☰
         </button>
         <div className="appBrand">SIGA FIUNA</div>
+        <button
+          type="button"
+          className="appLogoutBtn"
+          onClick={async () => {
+            await logout();
+            router.push("/auth");
+          }}
+          aria-label="Cerrar sesión"
+          title="Cerrar sesión"
+        >
+          🔓
+        </button>
       </header>
 
       {/* Overlay + Drawer: Portal (evita que en móvil “no se vea”) */}
@@ -162,6 +177,27 @@ export default function AppShell({ children }) {
         @media (max-width: 520px){
           .main{ padding: 12px; padding-top: 66px; }
           .mainInner{ max-width: 100%; }
+        }
+
+        .appLogoutBtn {
+          background: none;
+          border: none;
+          font-size: 20px;
+          cursor: pointer;
+          padding: 8px 12px;
+          border-radius: 6px;
+          transition: background 0.2s;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .appLogoutBtn:hover {
+          background: rgba(0, 0, 0, 0.05);
+        }
+
+        .appLogoutBtn:active {
+          background: rgba(0, 0, 0, 0.1);
         }
       `}</style>
     </div>

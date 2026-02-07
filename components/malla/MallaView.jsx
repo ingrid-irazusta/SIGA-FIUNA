@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { loadProfileAsync, loadMallaCacheAsync, saveMallaCacheAsync } from "../../lib/storage-adapter";
 import SemestreColumn from "./SemestreColumn";
 import { calcEstados, normText, parseRequisitos, isPlaceholderReq } from "./utils";
 
@@ -17,17 +18,7 @@ const CARRERAS = [
   "Ingeniería Civil",
 ];
 
-function loadProfile() {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(PROFILE_KEY);
-    if (!raw) return null;
-    const p = JSON.parse(raw);
-    return p && typeof p === "object" ? p : null;
-  } catch {
-    return null;
-  }
-}
+// Perfil se carga de forma asíncrona desde storage-adapter
 
 function storageKeyForAprobadas({ carrera, plan, ci }) {
   const c = normText(carrera);
@@ -79,11 +70,19 @@ export default function MallaView() {
   const [ci, setCi] = useState("");
 
   useEffect(() => {
-    const p = loadProfile();
-    if (!p) return;
-    if (CARRERAS.includes(p.carrera)) setCarrera(p.carrera);
-    if (p.malla === "2013" || p.malla === "2023") setPlan(p.malla);
-    if (typeof p.ci === "string") setCi(p.ci);
+    let mounted = true;
+    (async () => {
+      try {
+        const p = await loadProfileAsync("");
+        if (!p) return;
+        if (mounted && CARRERAS.includes(p.carrera)) setCarrera(p.carrera);
+        if (mounted && (p.malla === "2013" || p.malla === "2023")) setPlan(p.malla);
+        if (mounted && typeof p.ci === "string") setCi(p.ci);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => { mounted = false; };
   }, []);
 
   const [mode, setMode] = useState("estricto"); // estricto | flexible
@@ -157,6 +156,22 @@ export default function MallaView() {
         }
       }
 
+      // Intentar cargar cache desde Supabase (via adapter)
+      try {
+        const remote = await loadMallaCacheAsync(carrera, plan);
+        if (remote && Array.isArray(remote.items)) {
+          const remoteItems = remote.items;
+          if (!cacheUsed || new Date(remote.updated_at).getTime() > (Date.now() - LOCAL_CACHE_TTL_MS)) {
+            setItems(remoteItems);
+            cacheUsed = true;
+            shouldRevalidate = false;
+            setLoading(false);
+          }
+        }
+      } catch {
+        // ignore
+      }
+
       // Si no hay cache, sí mostramos loading.
       if (!cacheUsed) setLoading(true);
 
@@ -198,6 +213,7 @@ export default function MallaView() {
             // ignore
           }
         }
+        try { await saveMallaCacheAsync(carrera, plan, { items: prepared }); } catch(e) { /* ignore */ }
       } catch (e) {
         if (!cancelled) setError(e?.message || "Error inesperado");
       } finally {

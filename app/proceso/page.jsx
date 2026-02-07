@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Card from "../../components/Card";
 import BigModal from "./_components/BigModal";
 import InfoTip from "./_components/InfoTip";
+import { loadCurrentCoursesAsync } from "../../lib/storage-adapter";
 
 const COURSES_KEY = "fiuna_os_current_courses_v1";
 const PROCESS_KEY = "fiuna_os_proceso_v1";
@@ -187,14 +188,18 @@ function calcExoneracion(semestre, P) {
   return { ok: false, nota: null };
 }
 
-function loadCourses() {
+async function loadCoursesAsync() {
   try {
-    const raw = localStorage.getItem(COURSES_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const rows = await loadCurrentCoursesAsync();
+    return Array.isArray(rows) ? rows : [];
   } catch {
-    return [];
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem(COURSES_KEY) : null;
+      const parsed = raw ? JSON.parse(raw) : null;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -408,13 +413,15 @@ export default function ProcesoPage() {
 
 
   useEffect(() => {
-    const d = loadProceso();
-    const courses = loadCourses();
-    // 1ra carga: si existe la lista "Materias en curso" del Inicio,
-    // generamos tarjetas en base a ella.
-    const merged = mergeCoursesIntoItems(courses, d.items).map(migrateItemIfNeeded);
-    setItems(merged);
-    setDidLoadProceso(true);
+    (async () => {
+      const d = loadProceso();
+      const courses = await loadCoursesAsync();
+      // 1ra carga: si existe la lista "Materias en curso" del Inicio,
+      // generamos tarjetas en base a ella.
+      const merged = mergeCoursesIntoItems(courses, d.items).map(migrateItemIfNeeded);
+      setItems(merged);
+      setDidLoadProceso(true);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -423,8 +430,8 @@ export default function ProcesoPage() {
     saveProceso({ items });
   }, [didLoadProceso, items]);
 
-  const syncFromInicio = () => {
-    const courses = loadCourses();
+  const syncFromInicio = async () => {
+    const courses = await loadCoursesAsync();
     setItems((prev) => mergeCoursesIntoItems(courses, prev).map(migrateItemIfNeeded));
   };
 

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import Card from "../../components/Card";
+import { loadEvaluationsAsync, saveEvaluationsAsync, loadCurrentCoursesAsync, loadProfileAsync } from "../../lib/storage-adapter";
 
 const CURRENT_COURSES_KEY = "fiuna_os_current_courses_v1";
 const EVAL_KEY = "fiuna_os_evaluaciones_v1";
@@ -75,22 +76,25 @@ function daysDiffFromToday(dt) {
   return Math.round((b - a) / 86400000);
 }
 
-function buildFromInicioCourses() {
-  const raw = localStorage.getItem(CURRENT_COURSES_KEY);
-  const arr = safeParse(raw);
-  const list = Array.isArray(arr) ? arr : [];
-  // list items: {semestre/sem, nombre/mat, firma}
-  return list
-    .map((x) => String(x?.nombre || x?.mat || "").trim())
-    .filter(Boolean)
-    .map((materia) => ({
-      materia,
-      p1: { fecha: "", hora: "" },
-      p2: { fecha: "", hora: "" },
-      f1: { fecha: "", hora: "" },
-      f2: { fecha: "", hora: "" },
-      f3: { fecha: "", hora: "" },
-    }));
+async function buildFromInicioCourses(ci) {
+  try {
+    const arr = await loadCurrentCoursesAsync(ci);
+    const list = Array.isArray(arr) ? arr : [];
+    // list items: {semestre/sem, nombre/mat, firma}
+    return list
+      .map((x) => String(x?.nombre || x?.mat || "").trim())
+      .filter(Boolean)
+      .map((materia) => ({
+        materia,
+        p1: { fecha: "", hora: "" },
+        p2: { fecha: "", hora: "" },
+        f1: { fecha: "", hora: "" },
+        f2: { fecha: "", hora: "" },
+        f3: { fecha: "", hora: "" },
+      }));
+  } catch (e) {
+    return [];
+  }
 }
 
 
@@ -114,47 +118,55 @@ export default function EvaluacionesPage() {
   }, []);
 
   useEffect(() => {
-    try {
-      // Estado del toggle global del editor
-      const rawToggle = localStorage.getItem(EVAL_EDITOR_OPEN_KEY);
-      const hasToggle = rawToggle !== null;
-      const toggleVal = rawToggle === "1";
-
-      const saved = JSON.parse(localStorage.getItem(EVAL_KEY) || "null");
-      if (Array.isArray(saved) && saved.length) {
-        setRows(saved);
-        // Si el usuario no eligió todavía, por defecto ocultamos el editor cuando ya hay datos.
-        if (!hasToggle) {
-          const any = saved.some((r) =>
-            TYPES.some((t) => {
-              const c = r?.[t.key];
-              return Boolean((c?.fecha || "").trim() || (c?.hora || "").trim());
-            })
-          );
-          setShowEditor(!any);
-        } else {
-          setShowEditor(toggleVal);
-        }
-      } else {
-        // Si no hay nada guardado, armamos desde Inicio.
-        const fromInicio = buildFromInicioCourses();
-        setRows(fromInicio);
-        if (!hasToggle) setShowEditor(true);
-        else setShowEditor(toggleVal);
-      }
-    } catch {
-      const fromInicio = buildFromInicioCourses();
-      setRows(fromInicio);
+    let mounted = true;
+    const init = async () => {
       try {
-        const rawToggle = localStorage.getItem(EVAL_EDITOR_OPEN_KEY);
-        if (rawToggle !== null) setShowEditor(rawToggle === "1");
-        else setShowEditor(true);
-      } catch {
-        setShowEditor(true);
+        setLoaded(false);
+        const profile = await loadProfileAsync("");
+        const ci = profile?.ci || "";
+        if (mounted) setProfileCI(ci);
+
+        // Estado del toggle global del editor (seguimos guardando en localStorage para este toggle)
+        const rawToggle = typeof window !== 'undefined' ? localStorage.getItem(EVAL_EDITOR_OPEN_KEY) : null;
+        const hasToggle = rawToggle !== null;
+        const toggleVal = rawToggle === "1";
+
+        let saved = [];
+        if (ci) saved = await loadEvaluationsAsync(ci);
+
+        if (Array.isArray(saved) && saved.length) {
+          if (mounted) setRows(saved);
+          if (!hasToggle) {
+            const any = saved.some((r) =>
+              TYPES.some((t) => {
+                const c = r?.[t.key];
+                return Boolean((c?.fecha || "").trim() || (c?.hora || "").trim());
+              })
+            );
+            if (mounted) setShowEditor(!any);
+          } else {
+            if (mounted) setShowEditor(toggleVal);
+          }
+        } else {
+          const fromInicio = await buildFromInicioCourses(ci);
+          if (mounted) setRows(fromInicio);
+          if (!hasToggle) {
+            if (mounted) setShowEditor(true);
+          } else if (mounted) setShowEditor(toggleVal);
+        }
+      } catch (e) {
+        console.error('Error initializing evaluations:', e);
+        const fromInicio = await buildFromInicioCourses("");
+        if (mounted) setRows(fromInicio);
+        if (mounted) setShowEditor(true);
+      } finally {
+        if (mounted) setLoaded(true);
       }
-    } finally {
-      setLoaded(true);
-    }
+    };
+
+    init();
+
+    return () => { mounted = false; };
   }, []);
 
   // Mantener materias alineadas con Inicio (sin borrar lo ya cargado):
@@ -194,12 +206,19 @@ export default function EvaluacionesPage() {
 
   useEffect(() => {
     if (!loaded) return;
-    try {
-      localStorage.setItem(EVAL_KEY, JSON.stringify(rows));
-      try { window.dispatchEvent(new Event("fiuna_evaluaciones_updated")); } catch {}
-    } catch {
-      // ignore
-    }
+    const persist = async () => {
+      try {
+        if (profileCI) {
+          await saveEvaluationsAsync(profileCI, rows);
+        } else {
+          try { localStorage.setItem(EVAL_KEY, JSON.stringify(rows)); } catch {}
+        }
+        try { window.dispatchEvent(new Event("fiuna_evaluaciones_updated")); } catch {}
+      } catch (e) {
+        console.error('Error saving evaluations:', e);
+      }
+    };
+    persist();
   }, [rows, loaded]);
 
   // Persistimos el toggle global del editor

@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Card from "../../components/Card";
+import { loadProfileAsync, loadMallaCacheAsync, loadNotasAsync, saveNotasAsync, saveMallaCacheAsync } from "../../lib/storage-adapter";
 
-const PROFILE_KEY = "fiuna_os_profile_v1";
 const MALLA_CACHE_PREFIX = "fiuna_os_malla_cache_v1";
 // v4: 3 oportunidades base + 3 extras automáticas si quitó 1-1-1 (nota4..nota6)
 const NOTAS_PREFIX = "fiuna_os_notas_finales_v4";
@@ -16,13 +16,7 @@ function safeParse(raw){
   try{ return JSON.parse(raw); }catch{ return null; }
 }
 
-function loadProfile(){
-  try{
-    const raw = localStorage.getItem(PROFILE_KEY);
-    const p = safeParse(raw);
-    return p && typeof p === 'object' ? p : {};
-  }catch{ return {}; }
-}
+
 
 function storageKey({ carrera, plan, ci }){
   const c = normText(carrera);
@@ -229,51 +223,89 @@ export default function NotasFinalesPage(){
   const [rows, setRows] = useState([]);
   const [totalMalla, setTotalMalla] = useState(0);
 
-  // Cargar perfil + inicializar desde cache
+  // Cargar perfil + inicializar desde cache (Supabase via storage-adapter)
   useEffect(()=>{
-    const p = loadProfile();
-    const carrera = String(p?.carrera || '').trim();
-    const plan = (p?.malla === '2013' || p?.malla === '2023') ? p.malla : '2023';
-    const ci = String(p?.ci || '').trim();
-    setProfile({ carrera, malla: plan, ci });
+    let mounted = true;
+    const init = async () => {
+      try {
+        const p = await loadProfileAsync("");
+        const carrera = String(p?.carrera || '').trim();
+        const plan = (p?.malla === '2013' || p?.malla === '2023') ? p.malla : '2023';
+        const ci = String(p?.ci || '').trim();
+        if (mounted) setProfile({ carrera, malla: plan, ci });
+      } catch (e) {
+        console.error('Error loading profile for notas:', e);
+      }
+    };
+    init();
+    return () => { mounted = false; };
   },[]);
 
-  // Cargar notas (o crearlas desde malla cache)
+  // Cargar notas (o crearlas desde malla cache) usando storage-adapter
   useEffect(()=>{
-    if (!profile.carrera) return;
-    const key = storageKey({ carrera: profile.carrera, plan: profile.malla, ci: profile.ci });
-    let loaded = [];
-    try{
-      const raw = localStorage.getItem(key);
-      const parsed = safeParse(raw);
-      if (Array.isArray(parsed)) loaded = parsed;
-    }catch{ /* ignore */ }
-
-    const mallaItems = readMallaMaterias({ carrera: profile.carrera, plan: profile.malla });
-    setTotalMalla(mallaItems.length);
-    const baseRows = buildBaseRows(mallaItems);
-
-    // Si aún no hay malla cache, simplemente dejamos la lista vacía (sin mensajes molestos).
-
-    // Migración suave desde v3 (si existía): si no hay nada en v4, intentamos leer v3
-    if (!loaded.length){
+    let mounted = true;
+    const load = async () => {
+      if (!profile.carrera) return;
       try{
-        const legacyKey = key.replace(NOTAS_PREFIX, 'fiuna_os_notas_finales_v3');
-        const legacyRaw = localStorage.getItem(legacyKey);
-        const legacyParsed = safeParse(legacyRaw);
-        if (Array.isArray(legacyParsed)) loaded = legacyParsed;
-      }catch{ /* ignore */ }
-    }
+        const ci = profile.ci || '';
+        let loaded = [];
+        try{
+          loaded = await loadNotasAsync(ci, profile.carrera, profile.malla);
+        }catch(e){
+          console.error('Error loading notas from adapter:', e);
+          loaded = [];
+        }
 
-    const merged = mergeKeepNotas(loaded, baseRows);
-    setRows(merged);
+        // Leer malla cache desde adapter (fallback a localStorage si no existe)
+        let mallaData = null;
+        try{
+          mallaData = await loadMallaCacheAsync(profile.carrera, profile.malla);
+        }catch(e){
+          console.error('Error loading malla cache:', e);
+          mallaData = null;
+        }
+        const mallaItems = Array.isArray(mallaData?.items) ? mallaData.items : [];
+        setTotalMalla(mallaItems.length);
+        const baseRows = buildBaseRows(mallaItems);
+
+        // Migración suave desde v3 (si existía en localStorage):
+        if (!loaded.length){
+          try{
+            const legacyKey = storageKey({ carrera: profile.carrera, plan: profile.malla, ci: profile.ci }).replace(NOTAS_PREFIX, 'fiuna_os_notas_finales_v3');
+            const legacyRaw = typeof window !== 'undefined' ? localStorage.getItem(legacyKey) : null;
+            const legacyParsed = safeParse(legacyRaw);
+            if (Array.isArray(legacyParsed)) loaded = legacyParsed;
+          }catch{ /* ignore */ }
+        }
+
+        const merged = mergeKeepNotas(loaded, baseRows);
+        if (mounted) setRows(merged);
+      }catch(e){
+        console.error('Error initializing notas finales:', e);
+      }
+    };
+    load();
+    return ()=>{ mounted = false; };
   },[profile.carrera, profile.malla, profile.ci]);
 
-  // Persistir
+  // Persistir (guardar en Supabase via storage-adapter si hay CI)
   useEffect(()=>{
     if (!profile.carrera) return;
-    const key = storageKey({ carrera: profile.carrera, plan: profile.malla, ci: profile.ci });
-    try{ localStorage.setItem(key, JSON.stringify(rows)); }catch{ /* ignore */ }
+    const persist = async () => {
+      try{
+        const ci = profile.ci || '';
+        if (ci) {
+          await saveNotasAsync(ci, profile.carrera, profile.malla, rows);
+        } else {
+          // Fallback local
+          const key = storageKey({ carrera: profile.carrera, plan: profile.malla, ci: profile.ci });
+          try{ localStorage.setItem(key, JSON.stringify(rows)); }catch{}
+        }
+      }catch(e){
+        console.error('Error saving notas:', e);
+      }
+    };
+    persist();
   },[rows, profile]);
 
   const semestres = useMemo(()=>{

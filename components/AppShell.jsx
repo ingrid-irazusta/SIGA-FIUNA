@@ -3,23 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
+import { loadProfileAsync } from "../lib/storage-adapter";
 import { createPortal } from "react-dom";
 
 const APP_TITLE = "SISTEMA INTELIGENTE DE GESTIÓN ACADÉMICA FIUNA";
 const APP_VERSION = "v18";
 
-const PROFILE_KEY = "fiuna_os_profile_v1";
-
-function safeLoadProfile() {
-  try {
-    const raw = localStorage.getItem(PROFILE_KEY);
-    if (!raw) return null;
-    const p = JSON.parse(raw);
-    return p && typeof p === "object" ? p : null;
-  } catch {
-    return null;
-  }
-}
+// Profile will be loaded asynchronously from storage-adapter (Supabase/localStorage)
 
 const navItems = [
   { href: "/", label: "Inicio" },
@@ -80,19 +70,21 @@ export default function AppShell({ children }) {
     } catch {
       // ignore
     }
-    try {
-      const p = safeLoadProfile();
-      const carrera = String(p?.carrera || "").trim();
-      const malla = String(p?.malla || "").trim();
-      setProfileInfo({ carrera, malla });
-    } catch {
-      // ignore
-    }
+    (async () => {
+      try {
+        const p = await loadProfileAsync("");
+        const carrera = String(p?.carrera || "").trim();
+        const malla = String(p?.malla || "").trim();
+        setProfileInfo({ carrera, malla });
+      } catch {
+        // ignore
+      }
+    })();
 
     // Escuchar cambios del perfil desde Inicio (mismo tab)
-    const onProfileUpdated = () => {
+    const onProfileUpdated = async () => {
       try {
-        const p = safeLoadProfile();
+        const p = await loadProfileAsync("");
         const carrera = String(p?.carrera || "").trim();
         const malla = String(p?.malla || "").trim();
         setProfileInfo({ carrera, malla });

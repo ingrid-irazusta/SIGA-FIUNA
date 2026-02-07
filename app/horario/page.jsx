@@ -1,14 +1,15 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { loadScheduleAsync, saveScheduleAsync, loadProfileAsync } from "../../lib/storage-adapter";
 
 const DAYS = [
   { id: 1, short: "Lun", long: "Lunes" },
   { id: 2, short: "Mar", long: "Martes" },
-  { id: 3, short: "Mié", long: "Miércoles" },
+  { id: 3, short: "MiÃ©", long: "MiÃ©rcoles" },
   { id: 4, short: "Jue", long: "Jueves" },
   { id: 5, short: "Vie", long: "Viernes" },
-  { id: 6, short: "Sáb", long: "Sábado" },
+  { id: 6, short: "SÃ¡b", long: "SÃ¡bado" },
 ];
 
 const START_HOUR = 7;
@@ -27,39 +28,13 @@ const seed = {
   2: [],
   3: [],
   4: [
-    { id: 201, materia: "MECANICA Y CALOR", tipo: "T", seccion: "A", inicio: "08:00", fin: "10:00", prof: "—" },
+    { id: 201, materia: "MECANICA Y CALOR", tipo: "T", seccion: "A", inicio: "08:00", fin: "10:00", prof: "â€”" },
   ],
   5: [],
   6: [],
 };
 
-// Guardamos el horario en el navegador (localStorage) para poder usarlo en "Clases de hoy"
-const SCHEDULE_KEY = "fiuna_os_schedule_v1";
 
-function loadSchedule() {
-  if (typeof window === "undefined") return seed;
-  try {
-    const raw = window.localStorage.getItem(SCHEDULE_KEY);
-    if (!raw) return seed;
-    const parsed = JSON.parse(raw);
-    // Validación liviana: debe tener días 1..6
-    for (let i = 1; i <= 6; i++) {
-      if (!Object.prototype.hasOwnProperty.call(parsed, i)) return seed;
-    }
-    return parsed;
-  } catch {
-    return seed;
-  }
-}
-
-function saveSchedule(nextSchedule) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(SCHEDULE_KEY, JSON.stringify(nextSchedule));
-  } catch {
-    // ignore
-  }
-}
 
 function Badge({ tipo, seccion }) {
   const isTeo = tipo === "T";
@@ -79,7 +54,7 @@ function Modal({ open, onClose, title, children }) {
       <div className="calModal">
         <div className="calModalHead">
           <div className="calModalTitle">{title}</div>
-          <button className="calIconBtn" onClick={onClose} aria-label="Cerrar">✕</button>
+          <button className="calIconBtn" onClick={onClose} aria-label="Cerrar">âœ•</button>
         </div>
         <div className="calModalBody">{children}</div>
       </div>
@@ -107,10 +82,28 @@ export default function HorarioPage() {
     prof: "",
   });
 
-  // Carga inicial desde localStorage (solo cliente) para evitar hydration mismatch
+  const [profileCi, setProfileCi] = useState(null);
+
   useEffect(() => {
-    const stored = loadSchedule();
-    setSchedule(stored);
+    (async () => {
+      try {
+        const p = await loadProfileAsync();
+        if (p?.ci) setProfileCi(p.ci);
+      } catch {}
+    })();
+  }, []);
+
+  // Carga inicial desde adapter (solo cliente) para evitar hydration mismatch
+  useEffect(() => {
+    (async () => {
+      try {
+        const { loadScheduleAsync } = await import("../../lib/storage-adapter");
+        const stored = await loadScheduleAsync();
+        setSchedule(stored || seed);
+      } catch {
+        setSchedule(seed);
+      }
+    })();
   }, []);
 
   const hours = useMemo(() => {
@@ -152,12 +145,12 @@ export default function HorarioPage() {
   };
 
   const save = () => {
-    if (!form.materia.trim()) return alert("Escribí el nombre de la materia.");
+    if (!form.materia.trim()) return alert("EscribÃ­ el nombre de la materia.");
     if (timeToMin(form.fin) <= timeToMin(form.inicio)) return alert("La hora fin debe ser mayor a la hora inicio.");
 
     setSchedule((prev) => {
       const next = { ...prev };
-      // si estamos editando, primero borramos el viejo (por si cambia de día)
+      // si estamos editando, primero borramos el viejo (por si cambia de dÃ­a)
       if (editing) {
         next[editing.dayId] = (next[editing.dayId] || []).filter((x) => x.id !== editing.id);
       }
@@ -172,8 +165,11 @@ export default function HorarioPage() {
         prof: form.prof.trim(),
       };
       next[form.dayId] = [...(next[form.dayId] || []), item].sort((a, b) => a.inicio.localeCompare(b.inicio));
-        // ✅ Guardar real en localStorage al confirmar
-      saveSchedule(next);
+      // Persistir con adapter
+      try {
+        const ci = profileCi || null;
+        saveScheduleAsync(ci, next).catch(() => {});
+      } catch {}
       try { window.dispatchEvent(new Event("fiuna_schedule_updated")); } catch {}
 
       return next;
@@ -184,13 +180,16 @@ export default function HorarioPage() {
 
   const del = () => {
     if (!editing) return;
-    if (!confirm("¿Borrar esta clase?")) return;
+    if (!confirm("Â¿Borrar esta clase?")) return;
     setSchedule((prev) => {
       const next = { ...prev };
       next[editing.dayId] = (next[editing.dayId] || []).filter((x) => x.id !== editing.id);
-        // ✅ Persistir el borrado también
-      saveSchedule(next);
-      try { window.dispatchEvent(new Event("fiuna_schedule_updated")); } catch {}
+        // Persistir el borrado también
+        try {
+          const ci = profileCi || null;
+          saveScheduleAsync(ci, next).catch(() => {});
+        } catch {}
+        try { window.dispatchEvent(new Event("fiuna_schedule_updated")); } catch {}
 
       return next;
     });
@@ -207,7 +206,7 @@ export default function HorarioPage() {
       <div className="pageHeader">
         <div className="calTopControls">
           <div className="calToggle">
-            <button className={`calTBtn ${mode === "day" ? "on" : ""}`} onClick={() => setMode("day")}>Día</button>
+            <button className={`calTBtn ${mode === "day" ? "on" : ""}`} onClick={() => setMode("day")}>DÃ­a</button>
             <button className={`calTBtn ${mode === "week" ? "on" : ""}`} onClick={() => setMode("week")}>Semana</button>
           </div>
 
@@ -224,7 +223,7 @@ export default function HorarioPage() {
               ))}
             </div>
           ) : (
-            <button className="btnPrimary" onClick={() => openNew({ dayId: 1 })}>＋ Nueva clase</button>
+            <button className="btnPrimary" onClick={() => openNew({ dayId: 1 })}>ï¼‹ Nueva clase</button>
           )}
         </div>
       </div>
@@ -284,9 +283,9 @@ export default function HorarioPage() {
                         <Badge tipo={ev.tipo} seccion={ev.seccion} />
                         <div className="calEvTitle">{ev.materia}</div>
                         <div className="calEvMeta">
-                          <span className="calEvTime">{ev.inicio}–{ev.fin}</span>
+                          <span className="calEvTime">{ev.inicio}â€“{ev.fin}</span>
 </div>
-                        {ev.prof ? <div className="calEvProf">👨‍🏫 {ev.prof}</div> : null}
+                        {ev.prof ? <div className="calEvProf">ðŸ‘¨â€ðŸ« {ev.prof}</div> : null}
                       </button>
                     ))}
                   </div>
@@ -302,29 +301,29 @@ export default function HorarioPage() {
         <div className="card cardPad calDayCard">
           <div className="calDayHeader">
             <div className="h2">{DAYS.find((d) => d.id === activeDay)?.long}</div>
-            <button className="btnPrimary" onClick={() => openNew({ dayId: activeDay })}>＋ Agregar</button>
+            <button className="btnPrimary" onClick={() => openNew({ dayId: activeDay })}>ï¼‹ Agregar</button>
           </div>
 
           <div className="calDayList">
             {(schedule[activeDay] || []).length === 0 ? (
               <div className="calEmpty">
-                <div className="calEmptyTitle">Día libre</div>
-                <div className="muted">Tocá “Agregar” para crear una clase.</div>
+                <div className="calEmptyTitle">DÃ­a libre</div>
+                <div className="muted">TocÃ¡ â€œAgregarâ€ para crear una clase.</div>
               </div>
             ) : (
               (schedule[activeDay] || []).map((ev) => (
                 <div key={ev.id} className={`calCardItem ${ev.tipo === "P" ? "prac" : "teo"}`}>
                   <div className="calCardLeft">
-                    <div className="calCardTime">{ev.inicio}<span className="muted"> → </span>{ev.fin}</div>
+                    <div className="calCardTime">{ev.inicio}<span className="muted"> â†’ </span>{ev.fin}</div>
                     <div className="calCardTitle">{ev.materia}</div>
                     <div className="calCardSub">
                       <span className={`calMiniBadge ${ev.tipo === "P" ? "prac" : "teo"}`}>{ev.tipo}</span>
                       {ev.seccion ? <span className="calMiniBadge sec">Sec. {ev.seccion}</span> : null}
-{ev.prof ? <span className="calCardMeta">👨‍🏫 {ev.prof}</span> : null}
+{ev.prof ? <span className="calCardMeta">ðŸ‘¨â€ðŸ« {ev.prof}</span> : null}
                     </div>
                   </div>
                   <div className="calCardActions">
-                    <button className="calIconBtn" onClick={() => openEdit(activeDay, ev)} aria-label="Editar">✎</button>
+                    <button className="calIconBtn" onClick={() => openEdit(activeDay, ev)} aria-label="Editar">âœŽ</button>
                   </div>
                 </div>
               ))
@@ -339,15 +338,15 @@ export default function HorarioPage() {
         title={editing ? "Editar clase" : "Nueva clase"}
       >
         <div className="calForm">
-          <label className="calLbl">Día</label>
+          <label className="calLbl">DÃ­a</label>
           <select className="calInp" value={form.dayId} onChange={(e) => setForm((f) => ({ ...f, dayId: Number(e.target.value) }))}>
             {DAYS.map((d) => (
               <option key={d.id} value={d.id}>{d.long}</option>
             ))}
           </select>
 
-          <label className="calLbl">Materia(Nombre exacto, según Distribución de Aulas)</label>
-          <input className="calInp" value={form.materia} onChange={(e) => setForm((f) => ({ ...f, materia: e.target.value }))} placeholder="Ej: Física 1" />
+          <label className="calLbl">Materia(Nombre exacto, segÃºn DistribuciÃ³n de Aulas)</label>
+          <input className="calInp" value={form.materia} onChange={(e) => setForm((f) => ({ ...f, materia: e.target.value }))} placeholder="Ej: FÃ­sica 1" />
 
           <div className="calRow2">
             <div>
@@ -358,7 +357,7 @@ export default function HorarioPage() {
               </div>
             </div>
             <div>
-              <label className="calLbl">Sección</label>
+              <label className="calLbl">SecciÃ³n</label>
               <input className="calInp" value={form.seccion} onChange={(e) => setForm((f) => ({ ...f, seccion: e.target.value }))} placeholder="A" />
             </div>
           </div>
@@ -395,3 +394,4 @@ export default function HorarioPage() {
     </div>
   );
 }
+
